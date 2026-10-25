@@ -1,32 +1,40 @@
-# Aliento · Afirmaciones
+# Aliento · Afirmaciones + sync hábitos
 
-App de respiración (Ronda / Calma / Caja) con **una afirmación en la pausa**. Para Ismael.
+App de respiración (Ronda / Calma / Caja) con afirmación en la pausa y **envio automático al registro de hábitos** al terminar la sesión.
 
-## Abrir en el teléfono
-
-URL pública (GitHub Pages):
+## Abrir
 
 **https://aveqor2026.github.io/aliento/**
 
-Agrégala a la pantalla de inicio del teléfono (Compartir → Añadir a inicio).
+## Contéo → hábitos
 
-## Editar las 9 afirmaciones
+Al terminar una sesión con al menos 1 ronda/ciclo:
 
-1. Abre la app → toca **Afirmaciones** (arriba a la derecha).
-2. Cambia las frases → **Guardar**.
-3. Quedan en este teléfono (`localStorage`). La rotación empieza de nuevo con esa lista.
-4. **Volver a las 9 de inicio** restaura las frases originales.
+| En la app | En el CSV |
+|-----------|-----------|
+| 1 hold / ciclo completado | +1 `respiraciones` |
+| 3 holds en una sesión | fila con `cantidad=3` |
 
-## Rotación
+Fecha = día en America/New_York.
 
-En cada pausa (hold) aparece **una** frase. No se repite hasta agotar las 9. Si paras a la 2, la siguiente sesión sigue con las que faltan.
+## Conectar sync (una vez por dispositivo)
 
-## Desarrollo local
+1. El bot crea la routine webhook «Aliento → hábitos» (ver `PARENT_ROUTINE.md`).
+2. En desktop, abre la routine y copia **POST to** + **key**.
+3. En la app: **Afirmaciones** → sección **Hábitos (sync)** → pega URL y key → **Guardar sync** → **Probar sync**.
+4. Haz lo mismo en el iPad.
+
+La key solo vive en el teléfono/iPad (`localStorage`). No está en este repo.
+
+## Afirmaciones
+
+Edítalas en **Afirmaciones**. Rotan sin repetir hasta agotar la lista.
+
+## Desarrollo
 
 ```bash
 cd /workspace/aliento-afirmaciones
 python3 -m http.server 8765
-# http://localhost:8765
 ```
 
-Archivos: `index.html`, `app.js`, `afirmaciones.js`, `s.css`, `extra.css`.
+Archivos clave: `app.js`, `afirmaciones.js`, `sync.js`.

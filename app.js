@@ -1,4 +1,5 @@
 import { getAfirmaciones, setAfirmaciones, resetAfirmacionesToDefaults, nextAfirmacion, restantesEnCiclo, DEFAULT_AFIRMACIONES } from "./afirmaciones.js";
+import { reportSessionComplete, flushPending, getSyncConfig, setSyncConfig, testSync, loadPending } from "./sync.js";
 
 const STORAGE = "aliento-af-v1";
 const PACES = [
@@ -278,7 +279,7 @@ function recordHold(seconds) {
   return { beat, seconds };
 }
 
-function finishSession(result) {
+async function finishSession(result) {
   const s = { ...stats() };
   s.sessions += 1;
   if (result.mode !== "ronda") {
@@ -295,10 +296,26 @@ function finishSession(result) {
   }
   app.data.stats[app.personId] = s;
   saveState(app.data);
-  app.result = result;
-  app.screen = "done";
   stopSessionTimers();
   stopTone();
+
+  let syncInfo = { status: "skip" };
+  try {
+    const r = await reportSessionComplete({
+      rounds: result.rounds,
+      mode: result.mode,
+      longestHold: result.longestHold,
+    });
+    if (r.skipped) syncInfo = { status: "skip" };
+    else if (!r.flush.configured) syncInfo = { status: "need_config", pending: r.flush.failed };
+    else if (r.flush.failed === 0) syncInfo = { status: "ok", cantidad: r.payload.cantidad, fecha: r.payload.fecha };
+    else syncInfo = { status: "queued", pending: r.flush.failed, error: r.flush.lastError };
+  } catch (e) {
+    syncInfo = { status: "queued", pending: loadPending().length, error: e?.message };
+  }
+
+  app.result = { ...result, sync: syncInfo };
+  app.screen = "done";
   render();
 }
 
@@ -549,6 +566,9 @@ function render() {
 }
 
 function renderHome() {
+  // Reintentar sync pendiente al abrir
+  flushPending().catch(() => {});
+
   const st = stats();
   const p = person();
   const entries = app.data.entries.filter((e) => e.personId === app.personId).slice(0, 6);
@@ -950,12 +970,23 @@ function renderDone() {
   root.innerHTML = "";
   const main = el(`<main class="app-shell mx-auto w-full max-w-lg"></main>`);
   const box = el(`<div class="mx-auto flex max-w-lg flex-col items-center gap-6 text-center"></div>`);
+  const sync = r.sync || {};
+  let syncLine = "";
+  if (sync.status === "ok") {
+    syncLine = `<p class="text-sage">Hábitos: +${sync.cantidad} respiración${sync.cantidad === 1 ? "" : "es"} (${sync.fecha}).</p>`;
+  } else if (sync.status === "need_config") {
+    syncLine = `<p class="text-muted">Hábitos: falta conectar el sync en Afirmaciones (URL + clave). Quedó en cola (${sync.pending || 0}).</p>`;
+  } else if (sync.status === "queued") {
+    syncLine = `<p class="text-muted">Hábitos: en cola para reintentar${sync.error ? ` (${escapeHtml(sync.error)})` : ""}. Pendientes: ${sync.pending || 0}.</p>`;
+  }
+
   box.appendChild(
     el(`<div class="flex flex-col gap-2">
       <h1 class="display text-4xl">Listo, ${escapeHtml(person().name)}</h1>
       <p class="text-muted">${r.rounds} ${r.mode === "ronda" ? (r.rounds === 1 ? "ronda" : "rondas") : "ciclos"} en esta sesión${r.longestHold == null ? "" : ` · pausa ${fmtHold(r.longestHold)}`}</p>
       ${r.recordBeat ? `<p class="text-sage">Nuevo récord.</p>` : ""}
       <p class="text-sm text-muted">Quedó guardado en este teléfono.</p>
+      ${syncLine}
     </div>`)
   );
   const actions = el(`<div class="flex w-full flex-col gap-3"></div>`);
@@ -985,8 +1016,10 @@ function renderDone() {
 
 function renderSettings() {
   const list = getAfirmaciones();
-  // Pad to 9 slots for editing (user can clear extras)
   while (list.length < 9) list.push("");
+  const cfg = getSyncConfig();
+  const pending = loadPending().length;
+
   root.innerHTML = "";
   const main = el(`<main class="app-shell mx-auto w-full max-w-lg"></main>`);
   const box = el(`<div class="mx-auto flex max-w-lg flex-col gap-6"></div>`);
@@ -994,7 +1027,7 @@ function renderSettings() {
     el(`<header class="flex flex-col gap-2">
       <p class="text-sm font-medium text-sage">Ajustes</p>
       <h1 class="display text-4xl leading-none">Afirmaciones</h1>
-      <p class="text-muted">Estas frases aparecen de una en una en la pausa. Edítalas aquí; se guardan en este teléfono. La rotación no repite hasta agotarlas.</p>
+      <p class="text-muted">Estas frases aparecen de una en una en la pausa. Edítalas aquí; se guardan en este teléfono.</p>
     </header>`)
   );
   const form = el(`<div class="flex flex-col gap-3" id="af-form"></div>`);
@@ -1009,10 +1042,10 @@ function renderSettings() {
   box.appendChild(form);
   const status = el(`<p class="text-sm text-muted" id="af-status"></p>`);
   box.appendChild(status);
-  const actions = el(`<div class="flex flex-col gap-3"></div>`);
-  const save = el(`<button type="button" class="h-14 w-full rounded-full bg-gold font-semibold text-bg">Guardar</button>`);
+
+  const afActions = el(`<div class="flex flex-col gap-3"></div>`);
+  const save = el(`<button type="button" class="h-14 w-full rounded-full bg-gold font-semibold text-bg">Guardar frases</button>`);
   const reset = el(`<button type="button" class="h-12 w-full rounded-full border border-line font-medium">Volver a las 9 de inicio</button>`);
-  const back = el(`<button type="button" class="h-12 w-full rounded-full border border-line font-medium">Volver</button>`);
   save.onclick = () => {
     const inputs = [...form.querySelectorAll(".af-input")];
     const next = inputs.map((el) => el.value);
@@ -1029,14 +1062,66 @@ function renderSettings() {
     status.textContent = "Restablecidas las 9 de inicio. Rotación reiniciada.";
     status.className = "text-sm text-sage";
   };
+  afActions.appendChild(save);
+  afActions.appendChild(reset);
+  box.appendChild(afActions);
+
+  // —— Sync hábitos ——
+  box.appendChild(
+    el(`<header class="flex flex-col gap-2 mt-4">
+      <h2 class="display text-2xl">Hábitos (sync)</h2>
+      <p class="text-sm text-muted">Al terminar una sesión se envía el conteo a tu coach (EDÉN / hábitos). Pega aquí el <strong>POST to</strong> y la <strong>key</strong> de la routine webhook (solo en este teléfono o iPad; no se sube al repo). Pendientes: ${pending}.</p>
+    </header>`)
+  );
+  const syncForm = el(`<div class="card flex flex-col gap-3 p-4">
+    <label class="flex flex-col gap-1">
+      <span class="text-xs tracking-wide text-muted uppercase">POST to (URL)</span>
+      <input id="sync-url" type="url" autocomplete="off" spellcheck="false" class="rounded-xl border border-line bg-transparent px-3 py-3 text-sm text-fg outline-none" placeholder="https://api2.cursor.sh/automations/webhook/…" value="${escapeHtml(cfg.url)}"/>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-xs tracking-wide text-muted uppercase">Sender key</span>
+      <input id="sync-key" type="password" autocomplete="off" spellcheck="false" class="rounded-xl border border-line bg-transparent px-3 py-3 text-sm text-fg outline-none" placeholder="pega la key" value="${escapeHtml(cfg.key)}"/>
+    </label>
+    <p class="text-xs text-muted" id="sync-status"></p>
+  </div>`);
+  box.appendChild(syncForm);
+  const syncStatus = syncForm.querySelector("#sync-status");
+  const syncActions = el(`<div class="flex flex-col gap-3"></div>`);
+  const saveSync = el(`<button type="button" class="h-12 w-full rounded-full bg-sage font-semibold text-bg">Guardar sync</button>`);
+  const testBtn = el(`<button type="button" class="h-12 w-full rounded-full border border-line font-medium">Probar sync</button>`);
+  const flushBtn = el(`<button type="button" class="h-12 w-full rounded-full border border-line font-medium">Reenviar pendientes</button>`);
+  saveSync.onclick = () => {
+    setSyncConfig({
+      url: syncForm.querySelector("#sync-url").value,
+      key: syncForm.querySelector("#sync-key").value,
+    });
+    syncStatus.textContent = "Sync guardado en este dispositivo.";
+    syncStatus.className = "text-xs text-sage";
+  };
+  testBtn.onclick = async () => {
+    syncStatus.textContent = "Probando…";
+    const r = await testSync();
+    syncStatus.textContent = r.ok ? `OK (HTTP ${r.status}). Revisa el chat del bot.` : `Falló: ${r.error}`;
+    syncStatus.className = r.ok ? "text-xs text-sage" : "text-xs text-muted";
+  };
+  flushBtn.onclick = async () => {
+    syncStatus.textContent = "Reenviando…";
+    const r = await flushPending();
+    if (!r.configured) syncStatus.textContent = "Falta URL o key.";
+    else syncStatus.textContent = `Enviados ${r.sent}. Pendientes ${r.failed}.${r.lastError ? " " + r.lastError : ""}`;
+    syncStatus.className = "text-xs text-sage";
+  };
+  syncActions.appendChild(saveSync);
+  syncActions.appendChild(testBtn);
+  syncActions.appendChild(flushBtn);
+  box.appendChild(syncActions);
+
+  const back = el(`<button type="button" class="h-12 w-full rounded-full border border-line font-medium">Volver</button>`);
   back.onclick = () => {
     app.screen = "home";
     render();
   };
-  actions.appendChild(save);
-  actions.appendChild(reset);
-  actions.appendChild(back);
-  box.appendChild(actions);
+  box.appendChild(back);
   main.appendChild(box);
   root.appendChild(main);
 }
