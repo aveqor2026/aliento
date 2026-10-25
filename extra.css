@@ -1,0 +1,12 @@
+/* Afirmación en la fase de hold: una sola frase, grande, centrada */
+.afirmacion-panel {
+  min-height: 46vh;
+}
+.afirmacion-texto {
+  font-size: clamp(1.5rem, 5.5vw, 2.35rem);
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  color: var(--color-fg);
+  max-width: 22rem;
+  font-weight: 520;
+}
